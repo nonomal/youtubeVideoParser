@@ -3,7 +3,6 @@ package youtubevideoparser
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sync"
 	"time"
@@ -49,7 +48,7 @@ type cacheInfo struct {
 // 包含一层缓存包装
 func Parse(id string, client http.Client) (*VideoInfo, error) {
 	var now = time.Now()
-	caches.Range(func(key, value interface{}) bool {
+	caches.Range(func(key, value any) bool {
 		var v = value.(*cacheInfo)
 		if now.Sub(v.time) > time.Hour {
 			caches.Delete(key)
@@ -87,6 +86,15 @@ func NewParser(id string, client http.Client) (*Parser, error) {
 		}
 	}
 	if !ok {
+		// API 已返回但不可播：LOGIN_REQUIRED 是 IP 级风控，页面解析同样失败，无需 fallback
+		if status := player.Get("playabilityStatus.status").String(); status != "" {
+			ps := player.Get("playabilityStatus")
+			reason := ps.Get("reason").String()
+			if reason == "" {
+				reason = status
+			}
+			return nil, fmt.Errorf("%s %s %s", id, status, reason)
+		}
 		videoPageData, err := request.CacheGet(videoPageURL, client)
 		if err != nil {
 			return nil, err
@@ -125,26 +133,12 @@ func (p *Parser) Parse() (*VideoInfo, error) {
 			Captions: parseCaptions(p.Player),
 			Streams:  make(map[string]*StreamItem),
 		}
-		s          = p.Player.Get("streamingData")
-		err        error
-		cipherBody string
+		s   = p.Player.Get("streamingData")
+		err error
 	)
 	var buildURL = func(cipher string) (string, error) {
-		stream, err := url.ParseQuery(cipher)
-		if err != nil {
-			return "", err
-		}
-		if cipherBody == "" {
-			if jsPath == "" {
-				return "", fmt.Errorf("jsPath not found")
-			}
-			bs, err := request.CacheGetLong(baseURL+jsPath, p.client)
-			if err != nil {
-				return "", err
-			}
-			cipherBody = string(bs)
-		}
-		return getDownloadURL(stream, cipherBody)
+
+		return "", fmt.Errorf("not implemented")
 	}
 	var loop = func(key gjson.Result, value gjson.Result) bool {
 		var (

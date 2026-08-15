@@ -18,14 +18,8 @@ var (
 		"Accept-Language": []string{"zh-CN,zh;q=0.9,en;q=0.8"},
 	}
 
-	headers_ = http.Header{
-		"User-Agent":      []string{"com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"},
-		"Accept-Language": []string{"zh-CN,zh;q=0.9,en;q=0.8"},
-		"Content-Type":    []string{"application/json"},
-	}
-
 	bufferPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return bytes.NewBuffer(make([]byte, 32*1024))
 		},
 	}
@@ -36,6 +30,54 @@ var (
 )
 
 const api = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc&prettyPrint=false"
+
+// clientConfig 定义 YouTube InnerTube client 请求参数
+type clientConfig struct {
+	name    string // clientName
+	version string // clientVersion
+	ua      string // User-Agent 头
+	headers http.Header
+	body    func(videoID string) string
+}
+
+// androidVR 是 ANDROID_VR client（实测 26/26 直链，最快）
+func androidVR(videoID string) string {
+	return `{"context":{"client":{"clientName":"ANDROID_VR","clientVersion":"1.65.10","deviceMake":"Oculus","deviceModel":"Quest 3","androidSdkVersion":32,"osName":"Android","osVersion":"12L","hl":"en","gl":"US"}},"videoId":"` + videoID + `","contentCheckOk":true,"racyCheckOk":true}`
+}
+
+// ios 是 IOS client（实测 27/27 直链，备选）
+func ios(videoID string) string {
+	return `{"context":{"client":{"clientName":"IOS","clientVersion":"21.02.3","deviceModel":"iPhone16,2","osName":"iOS","osVersion":"18.1.0","hl":"en","gl":"US"}},"videoId":"` + videoID + `","contentCheckOk":true,"racyCheckOk":true}`
+}
+
+var clients = []clientConfig{
+	{
+		name:    "ANDROID_VR",
+		version: "1.65.10",
+		ua:      "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+		headers: http.Header{
+			"Content-Type":             []string{"application/json"},
+			"X-Youtube-Client-Name":    []string{"28"},
+			"X-Youtube-Client-Version": []string{"1.65.10"},
+			"Origin":                   []string{"https://www.youtube.com"},
+			"Accept-Language":          []string{"en-US,en;q=0.9"},
+		},
+		body: androidVR,
+	},
+	{
+		name:    "IOS",
+		version: "21.02.3",
+		ua:      "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
+		headers: http.Header{
+			"Content-Type":             []string{"application/json"},
+			"X-Youtube-Client-Name":    []string{"5"},
+			"X-Youtube-Client-Version": []string{"21.02.3"},
+			"Origin":                   []string{"https://www.youtube.com"},
+			"Accept-Language":          []string{"en-US,en;q=0.9"},
+		},
+		body: ios,
+	},
+}
 
 // LockGeter for http cache & lock get
 type LockGeter struct {
@@ -97,7 +139,7 @@ func (l *LockGeter) clean(now int64) {
 		return
 	}
 	l.time = now
-	l.caches.Range(func(key, value interface{}) bool {
+	l.caches.Range(func(key, value any) bool {
 		var v = value.(*cacheItem)
 		if v.time < now && !v.loading {
 			v.cancel()
@@ -145,7 +187,21 @@ func CacheGetLong(url string, client http.Client) ([]byte, error) {
 	return HttpProvider.DoRequest(url, http.MethodGet, headers, nil, url, client, 86400)
 }
 
+// CachePost 依次尝试 ANDROID_VR → IOS client 直到拿到响应
 func CachePost(id string, client http.Client) ([]byte, error) {
-	var body = strings.NewReader(`{"videoId":"` + id + `","context":{"client":{"clientName":"IOS","clientVersion":"19.45.4","deviceModel":"iPhone16,2"}}}`)
-	return HttpProvider.DoRequest(api, http.MethodPost, headers_, body, id, client, 7200)
+	var errs = []string{}
+	for i, c := range clients {
+		var h = c.headers.Clone()
+		h.Set("User-Agent", c.ua)
+		var key = fmt.Sprintf("%s/%s", id, c.name)
+		bs, err := HttpProvider.DoRequest(api, http.MethodPost, h, strings.NewReader(c.body(id)), key, client, 7200)
+		if err == nil {
+			return bs, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s_%s:%s", c.name, c.version, err))
+		if i == 0 {
+			continue
+		}
+	}
+	return nil, errors.New(strings.Join(errs, ";"))
 }
